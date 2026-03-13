@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: gops-face-postgres
+    environment:
+      POSTGRES_DB: face_recognition
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init_pgvector.sql:/docker-entrypoint-initdb.d/01-init_pgvector.sql:ro
+
+volumes:
+  pgdata:
+
