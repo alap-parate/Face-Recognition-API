@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.core.pipeline_timing import PipelineTimer
 from app.db.models import FaceSample, Person
 from app.services.face_engine import BaseFaceEngine, FaceVectorSample, InvalidFaceImageError
 
@@ -78,7 +79,10 @@ class FaceService:
             self.face_engine.extract_sample(payload, sample_index=index)
             for index, payload in enumerate(image_payloads, start=1)
         ]
+        svc_timer = PipelineTimer(self.settings.pipeline_timing)
+        t = svc_timer.start()
         aggregate_embedding, kept_samples = self.face_engine.aggregate_samples(samples)
+        t = svc_timer.record("aggregate_ms", t)
         dropped_sample_count = len(samples) - len(kept_samples)
         person = db.scalar(select(Person).where(Person.external_id == external_id))
         created = person is None
@@ -116,6 +120,12 @@ class FaceService:
             )
 
         db.commit()
+        svc_timer.record("db_ms", t)
+        svc_timer.log(
+            "face_service.enroll",
+            external_id=external_id,
+            images=len(image_payloads),
+        )
         return EnrollmentResult(
             external_id=person.external_id,
             name=person.name,
@@ -142,9 +152,16 @@ class FaceService:
         distance = Person.embedding.cosine_distance(query_sample.embedding.tolist()).label(
             "distance"
         )
+        svc_timer = PipelineTimer(self.settings.pipeline_timing)
+        t = svc_timer.start()
         rows = db.execute(
             select(Person, distance).order_by(distance).limit(limited_top_k)
         ).all()
+        svc_timer.record("pg_vector_search_ms", t)
+        svc_timer.log(
+            "face_service.recognize",
+            top_k=limited_top_k,
+        )
 
         candidates = [
             RecognitionCandidate(

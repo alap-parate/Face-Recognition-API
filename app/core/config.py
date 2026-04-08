@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     app_name: str = "Gops Face Recognition API"
     app_env: str = "development"
     debug: bool = False
+    pipeline_timing: bool = False
     api_v1_prefix: str = "/api/v1"
     database_url: str = (
         "postgresql+psycopg://postgres:postgres@localhost:5432/face_recognition"

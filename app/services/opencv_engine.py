@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from app.core.config import Settings
+from app.core.pipeline_timing import PipelineTimer
 from app.services.face_engine import (
     BaseFaceEngine,
     FaceNotFoundError,
@@ -61,11 +62,17 @@ class OpenCVFaceEngine(BaseFaceEngine):
         )
 
     def extract_sample(self, image_bytes: bytes, sample_index: int) -> FaceVectorSample:
+        timer = PipelineTimer(self.settings.pipeline_timing)
+        t = timer.start()
         image = self._decode_image(image_bytes)
+        t = timer.record("decode_ms", t)
         image = self._resize_image(image)
+        t = timer.record("resize_ms", t)
         image = self._normalize_lighting(image)
+        t = timer.record("lighting_ms", t)
         self.detector.setInputSize((image.shape[1], image.shape[0]))
         _, faces = self.detector.detect(image)
+        t = timer.record("yunet_detect_ms", t)
 
         if faces is None or len(faces) == 0:
             raise FaceNotFoundError("No face detected in the uploaded image.")
@@ -96,6 +103,7 @@ class OpenCVFaceEngine(BaseFaceEngine):
                 "Face image is too blurry. Capture a sharper image."
             )
 
+        t = timer.record("gates_ms", t)
         aligned_face = self.recognizer.alignCrop(image, face)
         raw_embedding = np.asarray(
             self.recognizer.feature(aligned_face),
@@ -104,11 +112,16 @@ class OpenCVFaceEngine(BaseFaceEngine):
         if raw_embedding.size == 0:
             raise FaceProcessingError("OpenCV SFace did not return an embedding.")
         embedding = self._fit_embedding_dim(self._l2_normalize(raw_embedding))
+        t = timer.record("sface_align_feature_ms", t)
         quality_score = self._compute_quality_score(
             detection_score=detection_score,
             blur_score=blur_score,
             face_width=face_width,
             face_height=face_height,
+        )
+        timer.log(
+            "opencv.extract_sample",
+            sample_index=sample_index,
         )
         return FaceVectorSample(
             sample_index=sample_index,

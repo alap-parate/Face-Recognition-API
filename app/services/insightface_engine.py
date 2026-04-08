@@ -7,6 +7,7 @@ import onnxruntime as ort
 from insightface.app import FaceAnalysis
 
 from app.core.config import Settings
+from app.core.pipeline_timing import PipelineTimer
 from app.services.face_engine import (
     BaseFaceEngine,
     FaceNotFoundError,
@@ -57,10 +58,16 @@ class InsightFaceEngine(BaseFaceEngine):
         return f"insightface:{self.settings.insightface_model_name}"
 
     def extract_sample(self, image_bytes: bytes, sample_index: int) -> FaceVectorSample:
+        timer = PipelineTimer(self.settings.pipeline_timing)
+        t = timer.start()
         image = self._decode_image(image_bytes)
+        t = timer.record("decode_ms", t)
         image = self._resize_image(image)
+        t = timer.record("resize_ms", t)
         image = self._normalize_lighting(image)
+        t = timer.record("lighting_ms", t)
         faces = self.app.get(image)
+        t = timer.record("insightface_get_ms", t)
 
         if not faces:
             raise FaceNotFoundError("No face detected in the uploaded image.")
@@ -92,11 +99,16 @@ class InsightFaceEngine(BaseFaceEngine):
             )
 
         embedding = self._extract_embedding(face)
+        t = timer.record("postprocess_ms", t)
         quality_score = self._compute_quality_score(
             detection_score=detection_score,
             blur_score=blur_score,
             face_width=face_width,
             face_height=face_height,
+        )
+        timer.log(
+            "insightface.extract_sample",
+            sample_index=sample_index,
         )
         return FaceVectorSample(
             sample_index=sample_index,
