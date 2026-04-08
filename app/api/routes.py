@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
-from app.db.session import get_db
 from app.schemas import (
     EnrollmentResponse,
     EnrollmentSampleResponse,
@@ -32,47 +28,50 @@ def read_upload_bytes(upload: UploadFile) -> bytes:
     return payload
 
 
+def _parse_bool_form(raw: str | bool) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    s = str(raw).strip().lower()
+    return s in ("1", "true", "yes", "on")
+
+
 @router.get("/health", response_model=HealthResponse)
-def health(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> HealthResponse:
-    db.execute(text("SELECT 1"))
+def health(request: Request) -> HealthResponse:
     face_service = get_face_service(request)
+    ready = face_service.qdrant_health()
     return HealthResponse(
-        status="ok",
+        status="ok" if ready else "degraded",
         model_name=face_service.model_name,
-        database_ready=True,
+        database_ready=ready,
     )
 
 
 @router.post("/faces/enroll", response_model=EnrollmentResponse)
 def enroll_face(
     request: Request,
+    org_id: str = Form(...),
     external_id: str = Form(...),
     name: str = Form(...),
+    is_active: str = Form("true"),
     images: list[UploadFile] = File(...),
-    db: Session = Depends(get_db),
 ) -> EnrollmentResponse:
     face_service = get_face_service(request)
     try:
         result = face_service.enroll(
-            db=db,
+            org_id=org_id,
             external_id=external_id,
             name=name,
+            is_active=_parse_bool_form(is_active),
             image_payloads=[read_upload_bytes(image) for image in images],
         )
     except FaceProcessingError as exc:
-        db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
-        db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except SQLAlchemyError as exc:
-        db.rollback()
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail="Database error while storing the enrollment.",
+            detail="Vector store error while storing the enrollment.",
         ) from exc
 
     return EnrollmentResponse(
@@ -97,25 +96,25 @@ def enroll_face(
 @router.post("/faces/recognize", response_model=RecognitionResponse)
 def recognize_face(
     request: Request,
+    org_id: str = Form(...),
     image: UploadFile = File(...),
     top_k: int = Form(3),
-    db: Session = Depends(get_db),
 ) -> RecognitionResponse:
     face_service = get_face_service(request)
     try:
         result = face_service.recognize(
-            db=db,
+            org_id=org_id,
             image_payload=read_upload_bytes(image),
             top_k=top_k,
         )
     except FaceProcessingError as exc:
-        db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except SQLAlchemyError as exc:
-        db.rollback()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail="Database error while searching for a face match.",
+            detail="Vector store error while searching for a face match.",
         ) from exc
 
     candidates = [

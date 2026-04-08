@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,10 +22,14 @@ class Settings(BaseSettings):
     debug: bool = False
     pipeline_timing: bool = False
     api_v1_prefix: str = "/api/v1"
-    database_url: str = (
-        "postgresql+psycopg://postgres:postgres@localhost:5432/face_recognition"
-    )
-    create_vector_extension: bool = True
+
+    # qdrant = search inside Qdrant. faiss = load all vectors from Qdrant into RAM (Faiss) for search.
+    vector_search_backend: Literal["qdrant", "faiss"] = "qdrant"
+    # If true, forces vector_search_backend to faiss (in-process vector matrix). Optional alias for VECTOR_SEARCH_BACKEND=faiss.
+    load_vectors_into_memory: bool = False
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str | None = None
+    qdrant_collection_name: str = "face_samples"
 
     face_backend: str = "insightface"
     insightface_model_name: str = "buffalo_s"
@@ -48,17 +53,24 @@ class Settings(BaseSettings):
     clahe_clip_limit: float = 2.0
     clahe_tile_grid_size: int = 8
 
-    min_enrollment_images: int = 3
+    min_enrollment_images: int = 5
     max_enrollment_images: int = 5
     enrollment_outlier_similarity: float = 0.35
 
-    insightface_recognition_match_threshold: float = 0.35
+    insightface_recognition_match_threshold: float = 0.32
     opencv_recognition_match_threshold: float = 0.637
     recognition_top_k_default: int = 3
     recognition_top_k_max: int = 10
 
-    hnsw_m: int = 16
-    hnsw_ef_construction: int = 64
+    faiss_probe_min: int = 50
+    faiss_probe_multiplier: int = 10
+
+    @property
+    def effective_vector_search_backend(self) -> Literal["qdrant", "faiss"]:
+        """Recognition path: Faiss loads all vectors into RAM; Qdrant runs search in Qdrant."""
+        if self.load_vectors_into_memory:
+            return "faiss"
+        return self.vector_search_backend
 
     @property
     def detection_size(self) -> tuple[int, int]:
@@ -77,6 +89,12 @@ class Settings(BaseSettings):
         if self.face_backend.lower() == "opencv":
             return self.opencv_recognition_match_threshold
         return self.insightface_recognition_match_threshold
+
+    def faiss_sample_probe_count(self, limited_top_k: int) -> int:
+        return max(
+            self.faiss_probe_min,
+            limited_top_k * self.faiss_probe_multiplier,
+        )
 
 
 @lru_cache(maxsize=1)

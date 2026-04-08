@@ -2,21 +2,21 @@
 
 FastAPI backend for:
 
-- face enrollment with 3 to 5 images
-- face recognition against registered users
-- PostgreSQL + pgvector vector search
+- face enrollment with **5** images (required)
+- face recognition against registered users (best-template / min cosine distance per person)
+- **Qdrant** stores all per-sample embeddings and payloads (`org_id`, `is_active`, etc.). Recognition can search **inside Qdrant** (`VECTOR_SEARCH_BACKEND=qdrant`) or **load every vector into app RAM** using **Faiss** (`VECTOR_SEARCH_BACKEND=faiss` or `LOAD_VECTORS_INTO_MEMORY=true`), rebuilding the in-memory index from Qdrant on startup and after enroll
 - switchable InsightFace or OpenCV inference backends
 
 ## Why 5 images?
 
-Five images are not strictly required. For a CPU and RAM constrained deployment, `3` good images is usually enough if they are:
+Enrollment requires **exactly five** images. They should be:
 
 - front-facing
 - sharp
 - evenly lit
 - slightly varied in yaw or expression
 
-This backend accepts `3` to `5` images and averages normalized embeddings after dropping obvious outlier samples. Use `5` when lighting, angle, or capture quality is inconsistent.
+The backend averages normalized embeddings after dropping obvious outlier samples (when enough samples remain) and upserts **one Qdrant point per kept sample** (vectors + metadata). Recognition scores each person by the **minimum** cosine distance across that person’s stored samples (best matching enrollment shot).
 
 ## Preprocessing strategy
 
@@ -30,13 +30,13 @@ The pipeline does:
 - backend-specific detection + alignment
 - blur and face-size quality checks
 - L2 normalization of embeddings
-- cosine-distance search in pgvector
+- Qdrant vector search (or Faiss over vectors loaded into memory), then **min distance per person**; thresholds apply to that min distance
 
 ## Stack
 
 - FastAPI
-- SQLAlchemy
-- PostgreSQL + pgvector
+- Qdrant (embedding + payload storage; optional remote server via `QDRANT_URL`)
+- FAISS (CPU), optional: in-RAM index when `VECTOR_SEARCH_BACKEND=faiss`
 - OpenCV
 - InsightFace + ONNX Runtime CPU provider
 - OpenCV YuNet + SFace
@@ -123,7 +123,7 @@ FACE_BACKEND=opencv
 Notes:
 
 - YuNet handles detection and landmark localization.
-- SFace produces the recognition embedding used for pgvector search.
+- SFace produces the recognition embedding stored in PostgreSQL and indexed in FAISS for search.
 - The default OpenCV cosine-distance threshold is `0.637`, which corresponds to the published SFace cosine similarity threshold of about `0.363`.
 
 ## Run the API
@@ -142,13 +142,17 @@ curl http://localhost:8000/api/v1/health
 
 ### Enroll a face
 
+Requires **five** `images` parts.
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/faces/enroll \
   -F "external_id=EMP-1001" \
   -F "name=Rahul Kumar" \
   -F "images=@face1.jpg" \
   -F "images=@face2.jpg" \
-  -F "images=@face3.jpg"
+  -F "images=@face3.jpg" \
+  -F "images=@face4.jpg" \
+  -F "images=@face5.jpg"
 ```
 
 ### Recognize a face
@@ -161,21 +165,20 @@ curl -X POST http://localhost:8000/api/v1/faces/recognize \
 
 ## Scaling notes for 10k+ users
 
-- `10,000` aggregated 512-dim vectors is small enough for PostgreSQL to handle comfortably.
-- This project stores one aggregate vector per user and optional sample vectors for audit and re-enrollment quality.
-- A cosine HNSW index is created on the user embedding column for future growth.
-- For only `10,000` users, exact search would also be acceptable, but HNSW gives headroom.
+- Recognition uses **FAISS IndexFlatIP** over **all** `face_samples` rows (up to 5× users if everyone has five samples). Flat search is exact; for very large galleries consider approximate FAISS indexes or sharding (future work).
+- `persons.embedding` still stores an aggregate vector; the HNSW index on that column is optional for future use and is **not** used by the current recognize path.
 
 ## Operational guidance
 
 - Start with `CPU_THREADS=1` on low-resource systems to prevent thread oversubscription.
 - Keep `DETECTION_WIDTH` and `DETECTION_HEIGHT` at `512` unless your camera images are difficult.
-- Use `INSIGHTFACE_RECOGNITION_MATCH_THRESHOLD=0.35` as a starting point for InsightFace.
+- Use `INSIGHTFACE_RECOGNITION_MATCH_THRESHOLD` (default `0.32`) as a starting point for InsightFace **min-template** cosine distance; retune on your data.
 - Use `OPENCV_RECOGNITION_MATCH_THRESHOLD=0.637` as a starting point for OpenCV SFace.
 - Reject images with multiple faces during enrollment and recognition to reduce false matches.
 
 ## References
 
 - InsightFace official repository: https://github.com/deepinsight/insightface
+- FAISS: https://github.com/facebookresearch/faiss
 - pgvector official repository: https://github.com/pgvector/pgvector
 - pgvector Python SQLAlchemy usage: https://github.com/pgvector/pgvector-python

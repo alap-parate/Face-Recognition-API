@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Sequence
 
-from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+import numpy as np
 
 from app.core.config import Settings
 from app.core.pipeline_timing import PipelineTimer
-from app.db.models import FaceSample, Person
 from app.services.face_engine import BaseFaceEngine, FaceVectorSample, InvalidFaceImageError
+from app.services.qdrant_store import QdrantStore
+from app.services.vector_types import RankedPerson, VectorSearch
 
 
 @dataclass(slots=True)
@@ -43,24 +43,39 @@ class RecognitionResult:
 
 
 class FaceService:
-    def __init__(self, settings: Settings, face_engine: BaseFaceEngine) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        face_engine: BaseFaceEngine,
+        qdrant_store: QdrantStore,
+        vector_search: VectorSearch,
+    ) -> None:
         self.settings = settings
         self.face_engine = face_engine
+        self._qdrant = qdrant_store
+        self._vector_search = vector_search
 
     @property
     def model_name(self) -> str:
         return self.face_engine.model_name
 
+    def qdrant_health(self) -> bool:
+        return self._qdrant.health_check()
+
     def enroll(
         self,
-        db: Session,
+        org_id: str,
         external_id: str,
         name: str,
+        is_active: bool,
         image_payloads: Sequence[bytes],
     ) -> EnrollmentResult:
+        org_id = org_id.strip()
         external_id = external_id.strip()
         name = name.strip()
 
+        if not org_id:
+            raise ValueError("org_id is required.")
         if not external_id:
             raise ValueError("external_id is required.")
         if not name:
@@ -71,8 +86,7 @@ class FaceService:
             <= self.settings.max_enrollment_images
         ):
             raise InvalidFaceImageError(
-                f"Provide between {self.settings.min_enrollment_images} and "
-                f"{self.settings.max_enrollment_images} images for enrollment."
+                f"Provide exactly {self.settings.min_enrollment_images} images for enrollment."
             )
 
         samples = [
@@ -81,54 +95,35 @@ class FaceService:
         ]
         svc_timer = PipelineTimer(self.settings.pipeline_timing)
         t = svc_timer.start()
-        aggregate_embedding, kept_samples = self.face_engine.aggregate_samples(samples)
+        _aggregate, kept_samples = self.face_engine.aggregate_samples(samples)
         t = svc_timer.record("aggregate_ms", t)
         dropped_sample_count = len(samples) - len(kept_samples)
-        person = db.scalar(select(Person).where(Person.external_id == external_id))
-        created = person is None
-        now = datetime.now(timezone.utc)
 
-        if person is None:
-            person = Person(
-                external_id=external_id,
-                name=name,
-                embedding=aggregate_embedding.tolist(),
-                sample_count=len(kept_samples),
-                last_enrolled_at=now,
-            )
-            db.add(person)
-            db.flush()
-        else:
-            person.name = name
-            person.embedding = aggregate_embedding.tolist()
-            person.sample_count = len(kept_samples)
-            person.last_enrolled_at = now
-            db.execute(delete(FaceSample).where(FaceSample.person_id == person.id))
-            db.flush()
+        existing_pid = self._qdrant.find_existing_person_id(org_id, external_id)
+        created = existing_pid is None
+        person_id = existing_pid if existing_pid is not None else str(uuid.uuid4())
 
-        for sample_index, sample in enumerate(kept_samples, start=1):
-            db.add(
-                FaceSample(
-                    person_id=person.id,
-                    sample_index=sample_index,
-                    detection_score=sample.detection_score,
-                    blur_score=sample.blur_score,
-                    quality_score=sample.quality_score,
-                    bbox=sample.bbox,
-                    embedding=sample.embedding.tolist(),
-                )
-            )
-
-        db.commit()
-        svc_timer.record("db_ms", t)
+        self._qdrant.delete_identity_points(org_id, external_id)
+        self._qdrant.upsert_enrollment(
+            org_id=org_id,
+            external_id=external_id,
+            name=name,
+            is_active=is_active,
+            person_id=person_id,
+            kept_samples=kept_samples,
+            sample_count=len(kept_samples),
+        )
+        self._vector_search.sync_after_enroll()
+        svc_timer.record("qdrant_ms", t)
         svc_timer.log(
             "face_service.enroll",
             external_id=external_id,
+            org_id=org_id,
             images=len(image_payloads),
         )
         return EnrollmentResult(
-            external_id=person.external_id,
-            name=person.name,
+            external_id=external_id,
+            name=name,
             created=created,
             submitted_image_count=len(image_payloads),
             stored_sample_count=len(kept_samples),
@@ -138,10 +133,14 @@ class FaceService:
 
     def recognize(
         self,
-        db: Session,
+        org_id: str,
         image_payload: bytes,
         top_k: int | None = None,
     ) -> RecognitionResult:
+        org_id = org_id.strip()
+        if not org_id:
+            raise ValueError("org_id is required.")
+
         requested_top_k = top_k or self.settings.recognition_top_k_default
         limited_top_k = min(
             max(1, requested_top_k),
@@ -149,29 +148,36 @@ class FaceService:
         )
 
         query_sample = self.face_engine.extract_sample(image_payload, sample_index=1)
-        distance = Person.embedding.cosine_distance(query_sample.embedding.tolist()).label(
-            "distance"
-        )
+        probe_k = self.settings.faiss_sample_probe_count(limited_top_k)
         svc_timer = PipelineTimer(self.settings.pipeline_timing)
         t = svc_timer.start()
-        rows = db.execute(
-            select(Person, distance).order_by(distance).limit(limited_top_k)
-        ).all()
-        svc_timer.record("pg_vector_search_ms", t)
+        ranked = self._vector_search.search_ranked_persons(
+            np.asarray(query_sample.embedding, dtype=np.float32),
+            org_id,
+            limited_top_k,
+            probe_k,
+        )
+        label = (
+            "faiss_search_ms"
+            if self.settings.effective_vector_search_backend == "faiss"
+            else "qdrant_search_ms"
+        )
+        svc_timer.record(label, t)
         svc_timer.log(
             "face_service.recognize",
             top_k=limited_top_k,
+            probe_k=probe_k,
         )
 
         candidates = [
             RecognitionCandidate(
-                external_id=person.external_id,
-                name=person.name,
-                distance=float(person_distance),
-                similarity=max(0.0, 1.0 - float(person_distance)),
-                sample_count=person.sample_count,
+                external_id=rp.external_id,
+                name=rp.name,
+                distance=float(rp.distance),
+                similarity=max(0.0, 1.0 - float(rp.distance)),
+                sample_count=rp.sample_count,
             )
-            for person, person_distance in rows
+            for rp in ranked
         ]
         matched = bool(candidates) and (
             candidates[0].distance <= self.settings.recognition_match_threshold
