@@ -24,9 +24,9 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
 
     # qdrant = search inside Qdrant. faiss = load all vectors from Qdrant into RAM (Faiss) for search.
-    vector_search_backend: Literal["qdrant", "faiss"] = "qdrant"
+    vector_search_backend: Literal["qdrant", "faiss"] = "faiss"
     # If true, forces vector_search_backend to faiss (in-process vector matrix). Optional alias for VECTOR_SEARCH_BACKEND=faiss.
-    load_vectors_into_memory: bool = False
+    load_vectors_into_memory: bool = True
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
     qdrant_collection_name: str = "face_samples"
