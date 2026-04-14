@@ -13,6 +13,7 @@ class RankedPerson:
     external_id: str
     name: str
     sample_count: int
+    employee_id: str | None = None
 
 
 class VectorSearch(Protocol):

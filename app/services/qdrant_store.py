@@ -36,9 +36,12 @@ class QdrantStore:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._collection = settings.qdrant_collection_name
+        raw_key = settings.qdrant_api_key
+        api_key = raw_key.strip() if isinstance(raw_key, str) and raw_key.strip() else None
         self._client = QdrantClient(
             url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key or None,
+            api_key=api_key,
+            check_compatibility=False,
         )
 
     @property
@@ -63,7 +66,7 @@ class QdrantStore:
                 distance=Distance.COSINE,
             ),
         )
-        for field in ("org_id", "person_id", "external_id"):
+        for field in ("org_id", "person_id", "external_id", "employee_id"):
             try:
                 self._client.create_payload_index(
                     collection_name=self._collection,
@@ -120,6 +123,7 @@ class QdrantStore:
         person_id: str,
         kept_samples: list[FaceVectorSample],
         sample_count: int,
+        employee_id: str | None = None,
     ) -> None:
         points: list[PointStruct] = []
         for sample in kept_samples:
@@ -141,6 +145,8 @@ class QdrantStore:
                 "quality_score": sample.quality_score,
                 "bbox": sample.bbox,
             }
+            if employee_id is not None:
+                payload["employee_id"] = employee_id
             points.append(
                 PointStruct(
                     id=_point_id(org_id, external_id, sid),
@@ -192,6 +198,7 @@ class QdrantStore:
         ranked = sorted(best.items(), key=lambda x: x[1][0])[:limited_top_k]
         out: list[RankedPerson] = []
         for _pid, (dist, pl) in ranked:
+            eid = pl.get("employee_id")
             out.append(
                 RankedPerson(
                     person_id=str(pl.get("person_id", "")),
@@ -199,6 +206,7 @@ class QdrantStore:
                     external_id=str(pl.get("external_id", "")),
                     name=str(pl.get("name", "")),
                     sample_count=int(pl.get("sample_count", 0)),
+                    employee_id=str(eid) if eid is not None else None,
                 )
             )
         return out

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
+from app.api.deps import require_x_api_key
 from app.schemas import (
     EnrollmentResponse,
     EnrollmentSampleResponse,
@@ -12,7 +13,7 @@ from app.schemas import (
 from app.services.face_engine import FaceProcessingError
 from app.services.face_service import FaceService
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_x_api_key)])
 
 
 def get_face_service(request: Request) -> FaceService:
@@ -52,6 +53,7 @@ def enroll_face(
     org_id: str = Form(...),
     external_id: str = Form(...),
     name: str = Form(...),
+    employee_id: str | None = Form(None),
     is_active: str = Form("true"),
     images: list[UploadFile] = File(...),
 ) -> EnrollmentResponse:
@@ -63,6 +65,7 @@ def enroll_face(
             name=name,
             is_active=_parse_bool_form(is_active),
             image_payloads=[read_upload_bytes(image) for image in images],
+            employee_id=employee_id,
         )
     except FaceProcessingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -77,6 +80,7 @@ def enroll_face(
     return EnrollmentResponse(
         external_id=result.external_id,
         name=result.name,
+        employee_id=result.employee_id,
         created=result.created,
         submitted_image_count=result.submitted_image_count,
         stored_sample_count=result.stored_sample_count,
@@ -99,6 +103,8 @@ def recognize_face(
     org_id: str = Form(...),
     image: UploadFile = File(...),
     top_k: int = Form(3),
+    device_identifier: str | None = Form(None),
+    client_id: str | None = Form(None),
 ) -> RecognitionResponse:
     face_service = get_face_service(request)
     try:
@@ -106,6 +112,8 @@ def recognize_face(
             org_id=org_id,
             image_payload=read_upload_bytes(image),
             top_k=top_k,
+            device_identifier=device_identifier,
+            client_id=client_id,
         )
     except FaceProcessingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -124,6 +132,7 @@ def recognize_face(
             distance=candidate.distance,
             similarity=candidate.similarity,
             sample_count=candidate.sample_count,
+            employee_id=candidate.employee_id,
         )
         for candidate in result.candidates
     ]
@@ -135,4 +144,8 @@ def recognize_face(
         query_quality_score=result.query_quality_score,
         best_match=best_match,
         candidates=candidates,
+        device_identifier=result.device_identifier,
+        client_id=result.client_id,
+        attendance_punch_success=result.attendance_punch_success,
+        attendance_punch_error=result.attendance_punch_error,
     )

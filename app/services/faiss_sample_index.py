@@ -75,6 +75,7 @@ class FaissFromQdrantSearch:
         ranked = sorted(best.items(), key=lambda x: x[1][0])[:limited_top_k]
         out: list[RankedPerson] = []
         for _pid, (dist, pl) in ranked:
+            eid = pl.get("employee_id")
             out.append(
                 RankedPerson(
                     person_id=str(pl.get("person_id", "")),
@@ -82,6 +83,7 @@ class FaissFromQdrantSearch:
                     external_id=str(pl.get("external_id", "")),
                     name=str(pl.get("name", "")),
                     sample_count=int(pl.get("sample_count", 0)),
+                    employee_id=str(eid) if eid is not None else None,
                 )
             )
         return out

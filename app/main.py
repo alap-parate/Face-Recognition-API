@@ -4,6 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.api.routes import router
 from app.core.config import get_settings
@@ -42,7 +43,17 @@ async def lifespan(app: FastAPI):
     _configure_pipeline_timing_logs()
     face_engine = create_face_engine(settings)
     qdrant_store = QdrantStore(settings)
-    qdrant_store.ensure_collection()
+    try:
+        qdrant_store.ensure_collection()
+    except UnexpectedResponse as exc:
+        if exc.status_code == 401:
+            raise RuntimeError(
+                "Qdrant returned 401 Unauthorized: the API key does not match this server. "
+                f"Set QDRANT_API_KEY to the same value as Qdrant's QDRANT__SERVICE__API_KEY "
+                f"(for the instance at {settings.qdrant_url!r}). "
+                "If Qdrant was started without an API key, leave QDRANT_API_KEY empty."
+            ) from exc
+        raise
     vector_search = _build_vector_search(qdrant_store)
     app.state.face_service = FaceService(
         settings=settings,

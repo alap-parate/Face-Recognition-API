@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     debug: bool = False
     pipeline_timing: bool = False
     api_v1_prefix: str = "/api/v1"
+    # When set, all /api/v1 routes require matching request header x-api-key.
+    api_key: str | None = None
 
     # qdrant = search inside Qdrant. faiss = load all vectors from Qdrant into RAM (Faiss) for search.
     vector_search_backend: Literal["qdrant", "faiss"] = "faiss"
@@ -64,6 +66,12 @@ class Settings(BaseSettings):
 
     faiss_probe_min: int = 50
     faiss_probe_multiplier: int = 10
+
+    # POST /mobile/attendance/device-punch on match (empty base URL disables integration).
+    attendance_api_base_url: str | None = None
+    attendance_api_key: str | None = None
+    attendance_app_version: str = "1.0.0"
+    attendance_punch_timeout_seconds: float = 15.0
 
     @property
     def effective_vector_search_backend(self) -> Literal["qdrant", "faiss"]:

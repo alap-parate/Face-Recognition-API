@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
 from app.core.config import Settings
 from app.core.pipeline_timing import PipelineTimer
+from app.services.attendance_punch import dispatch_attendance_punch
 from app.services.face_engine import BaseFaceEngine, FaceVectorSample, InvalidFaceImageError
 from app.services.qdrant_store import QdrantStore
 from app.services.vector_types import RankedPerson, VectorSearch
@@ -17,6 +18,7 @@ from app.services.vector_types import RankedPerson, VectorSearch
 class EnrollmentResult:
     external_id: str
     name: str
+    employee_id: str | None
     created: bool
     submitted_image_count: int
     stored_sample_count: int
@@ -31,6 +33,7 @@ class RecognitionCandidate:
     distance: float
     similarity: float
     sample_count: int
+    employee_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -40,6 +43,10 @@ class RecognitionResult:
     query_detection_score: float
     query_quality_score: float
     candidates: list[RecognitionCandidate]
+    device_identifier: str | None = None
+    client_id: str | None = None
+    attendance_punch_success: bool | None = None
+    attendance_punch_error: dict[str, Any] | None = None
 
 
 class FaceService:
@@ -69,10 +76,13 @@ class FaceService:
         name: str,
         is_active: bool,
         image_payloads: Sequence[bytes],
+        employee_id: str | None = None,
     ) -> EnrollmentResult:
         org_id = org_id.strip()
         external_id = external_id.strip()
         name = name.strip()
+        if employee_id is not None:
+            employee_id = employee_id.strip() or None
 
         if not org_id:
             raise ValueError("org_id is required.")
@@ -112,6 +122,7 @@ class FaceService:
             person_id=person_id,
             kept_samples=kept_samples,
             sample_count=len(kept_samples),
+            employee_id=employee_id,
         )
         self._vector_search.sync_after_enroll()
         svc_timer.record("qdrant_ms", t)
@@ -124,6 +135,7 @@ class FaceService:
         return EnrollmentResult(
             external_id=external_id,
             name=name,
+            employee_id=employee_id,
             created=created,
             submitted_image_count=len(image_payloads),
             stored_sample_count=len(kept_samples),
@@ -136,10 +148,16 @@ class FaceService:
         org_id: str,
         image_payload: bytes,
         top_k: int | None = None,
+        device_identifier: str | None = None,
+        client_id: str | None = None,
     ) -> RecognitionResult:
         org_id = org_id.strip()
         if not org_id:
             raise ValueError("org_id is required.")
+        if device_identifier is not None:
+            device_identifier = device_identifier.strip() or None
+        if client_id is not None:
+            client_id = client_id.strip() or None
 
         requested_top_k = top_k or self.settings.recognition_top_k_default
         limited_top_k = min(
@@ -163,11 +181,15 @@ class FaceService:
             else "qdrant_search_ms"
         )
         svc_timer.record(label, t)
-        svc_timer.log(
-            "face_service.recognize",
-            top_k=limited_top_k,
-            probe_k=probe_k,
-        )
+        log_ctx: dict[str, str | int | float] = {
+            "top_k": limited_top_k,
+            "probe_k": probe_k,
+        }
+        if device_identifier is not None:
+            log_ctx["device_identifier"] = device_identifier
+        if client_id is not None:
+            log_ctx["client_id"] = client_id
+        svc_timer.log("face_service.recognize", **log_ctx)
 
         candidates = [
             RecognitionCandidate(
@@ -176,16 +198,35 @@ class FaceService:
                 distance=float(rp.distance),
                 similarity=max(0.0, 1.0 - float(rp.distance)),
                 sample_count=rp.sample_count,
+                employee_id=rp.employee_id,
             )
             for rp in ranked
         ]
         matched = bool(candidates) and (
             candidates[0].distance <= self.settings.recognition_match_threshold
         )
+        face_score = candidates[0].similarity if candidates else None
+        best_employee_id = candidates[0].employee_id if candidates else None
+        punch_outcome = dispatch_attendance_punch(
+            self.settings,
+            matched=matched,
+            device_identifier=device_identifier,
+            employee_id=best_employee_id,
+            face_match_score=face_score,
+        )
+        punch_ok: bool | None = None
+        punch_err: dict[str, Any] | None = None
+        if punch_outcome is not None:
+            punch_ok = punch_outcome.success
+            punch_err = None if punch_outcome.success else punch_outcome.error
         return RecognitionResult(
             matched=matched,
             threshold=self.settings.recognition_match_threshold,
             query_detection_score=query_sample.detection_score,
             query_quality_score=query_sample.quality_score,
             candidates=candidates,
+            device_identifier=device_identifier,
+            client_id=client_id,
+            attendance_punch_success=punch_ok,
+            attendance_punch_error=punch_err,
         )
